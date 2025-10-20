@@ -1,0 +1,6 @@
+vk-api==11.9.9
+requests==2.31.0
+python-dotenv==1.0.0
+asyncio
+aiohttp==3.9.1
+flask==2.3.3
