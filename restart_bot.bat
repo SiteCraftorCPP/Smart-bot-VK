@@ -1,0 +1,6 @@
+@echo off
+echo Останавливаем бота...
+taskkill /f /im python.exe 2>nul
+timeout /t 2 /nobreak >nul
+echo Запускаем бота...
+py main.py
