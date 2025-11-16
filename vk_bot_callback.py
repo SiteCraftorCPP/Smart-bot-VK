@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 from config import Config
 from deepseek_client import DeepSeekClient
+from user_manager import UserManager
 from flask import Flask, request, jsonify
 import json
 import hmac
@@ -28,6 +29,7 @@ class VKBotCallback:
         
         # Инициализация DeepSeek клиента
         self.deepseek = DeepSeekClient()
+        self.user_manager = UserManager()
         
         # Секретный ключ для Callback API
         self.secret_key = "ggqwFGQG231GQQG"
@@ -95,30 +97,23 @@ class VKBotCallback:
         """
         return text.startswith(self.config.BOT_PREFIX)
     
-    def process_command(self, text: str) -> Optional[str]:
+    def process_command(self, user_id: int, text: str) -> Optional[str]:
         """
         Обрабатывает команды бота
         """
         command = text[1:].lower().strip()
+        admin_command = "adminpasdemkagg@ee11"
         
-        if command == "help" or command == "помощь":
-            return """🤖 Доступные команды:
-            !help - показать это сообщение
-            !ping - проверить работу бота
-            !status - статус API
+        if command == admin_command:
+            user = self.user_manager.get_user(user_id)
+            if user.get('admin_unlimited'):
+                return "✅ У вас уже есть безлимитный доступ."
             
-            Просто напишите сообщение без префикса для общения с AI!"""
+            if self.user_manager.grant_admin_unlimited(user_id):
+                return "✅ Безлимитный доступ активирован. Лимиты отключены."
+            return "❌ Не удалось активировать безлимитный доступ."
         
-        elif command == "ping":
-            return "🏓 Pong! Бот работает!"
-        
-        elif command == "status":
-            deepseek_status = "✅ Работает" if self.deepseek.is_api_available() else "❌ Недоступен"
-            return f"""📊 Статус сервисов:
-            DeepSeek API: {deepseek_status}
-            VK API: ✅ Работает"""
-        
-        return None
+        return "❌ Эта команда недоступна."
     
     async def handle_message(self, user_id: int, text: str):
         """
@@ -127,7 +122,7 @@ class VKBotCallback:
         try:
             # Проверяем команды
             if self.is_command(text):
-                response = self.process_command(text)
+                response = self.process_command(user_id, text)
                 if response:
                     self.send_message(user_id, response)
                     return

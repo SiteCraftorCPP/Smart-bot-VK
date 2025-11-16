@@ -19,7 +19,14 @@ class Config:
     YANDEX_API_KEY_ID = os.getenv('YANDEX_API_KEY_ID')
     YANDEX_API_SECRET_KEY = os.getenv('YANDEX_API_SECRET_KEY')
 
-    # Настройки бота
+    # Database (PostgreSQL)
+    DB_HOST = os.getenv('DB_HOST', 'localhost')
+    DB_PORT = os.getenv('DB_PORT', '5432')
+    DB_USER = os.getenv('DB_USER', 'postgres')
+    DB_PASSWORD = os.getenv('DB_PASSWORD')
+    DB_NAME = os.getenv('DB_NAME', 'smartbot_db')
+
+    # Bot settings
     BOT_PREFIX = os.getenv('BOT_PREFIX', '!')
     MAX_MESSAGE_LENGTH = int(os.getenv('MAX_MESSAGE_LENGTH', 4096))
     USERS_FILE = "users.json"  # Файл для хранения данных пользователей

@@ -1,205 +1,369 @@
 import json
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
 from datetime import datetime, timedelta
 from config import Config
+from db_manager import db_manager # Импортируем наш новый менеджер БД
+import logging
+
+logger = logging.getLogger(__name__)
 
 class UserManager:
-    def __init__(self, data_file: str = "users.json"):
-        self.data_file = data_file
-        self.users = self.load_users()
-        self.subscription_plans = {
-            'free': {'max_photo': 1, 'max_tokens': 15000, 'price': 0},
-            'lite': {'max_photo': 10, 'max_tokens': 200000, 'price': 199},
-            'pro': {'max_photo': 50, 'max_tokens': 1000000, 'price': 499}
-        }
+    def __init__(self):
+        # Теперь self.users - это кеш, а не основное хранилище
+        self.users_cache = {}
+        self.subscription_plans = self._load_subscription_plans()
 
-    def load_users(self) -> Dict:
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                return {}
-        return {}
-
-    def save_users(self):
-        try:
-            with open(self.data_file, 'w', encoding='utf-8') as f:
-                json.dump(self.users, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Ошибка сохранения пользователей: {e}")
+    def _load_subscription_plans(self):
+        """Загружает тарифы из базы данных при старте."""
+        plans = db_manager.get_subscription_plans()
+        if not plans:
+            logger.error("Не удалось загрузить тарифные планы из БД! Используются значения по умолчанию.")
+            # Возвращаем запасной вариант, если БД недоступна
+            return {
+               'free': {'max_tokens': None, 'deepseek_max_requests': 5, 'yandex_max_requests': 2, 'price': 0},
+               'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 300},
+               'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 449}
+            }
+        logger.info("Тарифные планы успешно загружены из БД.")
+        return plans
 
     def get_user(self, user_id: int) -> Dict:
+        """
+        Получает пользователя. Сначала ищет в кеше, если нет - в БД.
+        Если нет в БД, создает нового.
+        """
         user_id_str = str(user_id)
-        if user_id_str not in self.users:
-            self.users[user_id_str] = {
-                'subscription_type': 'free',
-                'subscription_expires': None,
-                'photo_recognitions_used': 0,
-                'extra_photos': 0,
-                'tokens_used': 0,
-                'created_at': datetime.now().isoformat(),
-                'conversation_history': []
-            }
-            self.save_users()
+        if user_id_str in self.users_cache:
+            return self.users_cache[user_id_str]
+
+        user_data = db_manager.get_user(user_id)
         
-        # Проверяем, есть ли у существующего пользователя новая структура данных
-        user_data = self.users[user_id_str]
-        # Миграция старых данных
-        if 'tokens_used' not in user_data:
-            user_data['tokens_used'] = 0
-        if 'extra_photos' not in user_data:
-            user_data['extra_photos'] = 0
-        if 'subscription_type' not in user_data:
-            # Если нет - это старый пользователь. Обновляем его.
-            user_data['subscription_type'] = 'free'
-            user_data['subscription_expires'] = None
-            user_data['photo_recognitions_used'] = 0
-            user_data['conversation_history'] = [] # Ensure conversation history is initialized
-            self.save_users()
+        if not user_data:
+            user_data = db_manager.create_user(user_id)
+
+        # Конвертируем datetime объекты в строки для совместимости
+        for key, value in user_data.items():
+            if isinstance(value, datetime):
+                user_data[key] = value.isoformat()
+        
+        # Гарантируем наличие флага безлимита
+        if 'admin_unlimited' not in user_data:
+            user_data['admin_unlimited'] = False
+        
+        # Добавляем в кеш
+        self.users_cache[user_id_str] = user_data
+        return user_data
+
+    def update_user_profile_from_vk(self, user_id: int, vk_api):
+        """
+        Получает информацию о пользователе из VK API и сохраняет в БД.
+        Вызывается при первом контакте с ботом.
+        """
+        try:
+            # Получаем информацию о пользователе из VK
+            user_info = vk_api.users.get(user_ids=user_id, fields='first_name,last_name,phone')[0]
             
-        if 'conversation_history' not in user_data:
-            user_data['conversation_history'] = []
+            first_name = user_info.get('first_name', '')
+            last_name = user_info.get('last_name', '')
+            full_name = f"{first_name} {last_name}".strip()
+            profile_link = f"https://vk.com/id{user_id}"
+            phone_number = user_info.get('phone')
+            
+            # Сохраняем в БД
+            if db_manager.update_user_profile(user_id, full_name=full_name, profile_link=profile_link, phone_number=phone_number):
+                # Обновляем кеш
+                if str(user_id) in self.users_cache:
+                    self.users_cache[str(user_id)]['full_name'] = full_name
+                    self.users_cache[str(user_id)]['profile_link'] = profile_link
+                    if phone_number:
+                        self.users_cache[str(user_id)]['phone_number'] = phone_number
+                logger.info(f"Профиль пользователя {user_id} обновлен: {full_name}")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка получения профиля пользователя {user_id} из VK: {e}")
+        return False
 
-        self.save_users()
-        
-        return self.users[user_id_str]
-
+    # Методы для работы с историей пока оставляем без изменений,
+    # так как хранить историю в БД для каждого сообщения - избыточно.
+    # Это лучше делать в кеше (как сейчас) или в Redis.
     def get_history(self, user_id: int) -> list:
         user = self.get_user(user_id)
-        return user.get('conversation_history', [])
+        # Убедимся, что поле есть, даже если пользователь только что создан
+        if 'conversation_history' not in user:
+            user['conversation_history'] = []
+        return user['conversation_history']
 
     def add_to_history(self, user_id: int, role: str, content: str):
         user = self.get_user(user_id)
-        history = user.get('conversation_history', [])
+        history = self.get_history(user_id)
         
         history.append({"role": role, "content": content})
         
-        # Обрезаем историю, если она слишком длинная
         if len(history) > Config.MAX_HISTORY_MESSAGES:
             history = history[-Config.MAX_HISTORY_MESSAGES:]
             
-        self.users[str(user_id)]['conversation_history'] = history
-        self.save_users()
+        user['conversation_history'] = history
+        # Нет необходимости сохранять в БД каждое сообщение
 
     def clear_history(self, user_id: int):
         user = self.get_user(user_id)
-        self.users[str(user_id)]['conversation_history'] = []
-        self.save_users()
+        user['conversation_history'] = []
 
-    def can_recognize_photo(self, user_id: int) -> tuple[bool, str]:
-        user = self.get_user(user_id)
-        plan_type = user['subscription_type']
-        
-        # Проверяем, не истекла ли подписка
-        if user['subscription_expires'] and datetime.fromisoformat(user['subscription_expires']) < datetime.now():
-            user['subscription_type'] = 'free'
-            plan_type = 'free'
-            self.save_users()
-            
-        plan_limits = self.subscription_plans.get(plan_type, self.subscription_plans['free'])
-        total_photo_limit = plan_limits['max_photo'] + user.get('extra_photos', 0)
-        
-        if user['photo_recognitions_used'] < total_photo_limit:
-            remaining = total_photo_limit - user['photo_recognitions_used']
-            return True, f"Доступно распознаваний: {remaining}"
-        else:
-            return False, self.get_subscription_message(user_id)
-    
-    def check_token_limit(self, user_id: int) -> tuple[bool, str]:
+    def can_make_deepseek_request(self, user_id: int) -> Tuple[bool, str]:
+        """Проверяет, может ли пользователь сделать запрос к DeepSeek API"""
         user = self.get_user(user_id)
         plan_type = user.get('subscription_type', 'free')
-        plan_limits = self.subscription_plans.get(plan_type, self.subscription_plans['free'])
         
-        # В бесплатном тарифе лимит жесткий, в платных - нет (только по дням)
-        # if plan_type != 'free' and plan_limits['max_tokens'] == 0:
-        #    return True, "У вас безлимитные токены в рамках подписки."
+        expires_str = user.get('subscription_end')
+        if expires_str:
+            try:
+                if datetime.fromisoformat(expires_str) < datetime.now():
+                    self.reset_user_limits(user_id)
+                    user = self.get_user(user_id)
+                    plan_type = 'free'
+            except (ValueError, TypeError):
+                pass
+            
+        plan_limits = self.subscription_plans.get(plan_type, self.subscription_plans['free'])
 
-        if user.get('tokens_used', 0) < plan_limits['max_tokens']:
+        if user.get('admin_unlimited'):
+            return True, ""
+        
+        # Для FREE: проверяем лимит запросов
+        if plan_type == 'free':
+            deepseek_limit = plan_limits.get('deepseek_max_requests')
+            if deepseek_limit is None:
+                deepseek_limit = 5
+            requests_count = user.get('requests_count', 0)
+            if requests_count is None:
+                requests_count = 0
+            if requests_count < deepseek_limit:
+                remaining = deepseek_limit - requests_count
+                return True, f"Доступно запросов: {remaining}"
+            else:
+                return False, self.get_subscription_message()
+        
+        # Для LITE/PREMIUM: проверяем только токены (контроль токенами)
+        tokens_remaining = user.get('tokens_remaining', 0) or 0
+        tokens_remaining = int(tokens_remaining)
+        if tokens_remaining > 0:
             return True, ""
         else:
-            msg = f"🚫 **Лимит токенов исчерпан!**\n\nВы использовали {user.get('tokens_used', 0):,} из {plan_limits['max_tokens']:,} доступных токенов.\n\n"
-            msg += self.get_subscription_message(user_id, show_photo_limit_exceeded=False)
-            return False, msg
-
-    def increment_photo_usage(self, user_id: int):
+            max_tokens = plan_limits.get('max_tokens', 0)
+            if max_tokens is None:
+                max_tokens = 0
+            return False, self.get_subscription_message()
+    
+    def can_make_yandex_request(self, user_id: int) -> Tuple[bool, str]:
+        """Проверяет, может ли пользователь сделать запрос к Yandex Vision API"""
         user = self.get_user(user_id)
-        user['photo_recognitions_used'] += 1
-        self.save_users()
+        plan_type = user.get('subscription_type', 'free')
+        
+        expires_str = user.get('subscription_end')
+        if expires_str:
+            try:
+                if datetime.fromisoformat(expires_str) < datetime.now():
+                    self.reset_user_limits(user_id)
+                    user = self.get_user(user_id)
+                    plan_type = 'free'
+            except (ValueError, TypeError):
+                pass
+            
+        plan_limits = self.subscription_plans.get(plan_type, self.subscription_plans['free'])
+
+        if user.get('admin_unlimited'):
+            return True, ""
+        yandex_limit = plan_limits.get('yandex_max_requests')
+        if yandex_limit is None:
+            yandex_limit = 2
+        yandex_count = user.get('yandex_requests_count', 0)
+        if yandex_count is None:
+            yandex_count = 0
+        
+        if yandex_count < yandex_limit:
+            remaining = yandex_limit - yandex_count
+            return True, f"Доступно запросов к Yandex: {remaining}"
+        else:
+            return False, self.get_subscription_message(photo=True)
+
+    def check_token_limit(self, user_id: int) -> Tuple[bool, str]:
+        """Проверяет лимит токенов пользователя (только для LITE/PREMIUM)"""
+        user = self.get_user(user_id)
+        plan_type = user.get('subscription_type', 'free')
+        
+        # Для FREE не проверяем токены (там контроль по запросам)
+        if plan_type == 'free':
+            return True, ""
+        
+        plan_limits = self.subscription_plans.get(plan_type, self.subscription_plans['free'])
+        
+        # Проверяем оставшиеся токены
+        if user.get('admin_unlimited'):
+            return True, ""
+        tokens_remaining = user.get('tokens_remaining', 0) or 0
+        tokens_remaining = int(tokens_remaining)
+        
+        if tokens_remaining > 0:
+            return True, ""
+        else:
+            return False, self.get_subscription_message()
+
+    def increment_deepseek_request_count(self, user_id: int):
+        """Увеличивает счетчик запросов к DeepSeek (только для FREE)"""
+        user = self.get_user(user_id)
+        plan_type = user.get('subscription_type', 'free')
+        
+        if user.get('admin_unlimited'):
+            return
+        
+        # Увеличиваем счетчик только для FREE (для LITE/PREMIUM контроль токенами)
+        if plan_type == 'free':
+            new_count = user.get('requests_count', 0) + 1
+            if db_manager.update_user(user_id, requests_count=new_count):
+                user['requests_count'] = new_count
+    
+    def increment_yandex_request_count(self, user_id: int):
+        """Увеличивает счетчик запросов к Yandex Vision"""
+        user = self.get_user(user_id)
+        if user.get('admin_unlimited'):
+            return
+        new_count = user.get('yandex_requests_count', 0) + 1
+        if db_manager.update_user(user_id, yandex_requests_count=new_count):
+            user['yandex_requests_count'] = new_count
 
     def increment_token_usage(self, user_id: int, amount: int):
+        """Увеличивает количество использованных токенов и уменьшает остаток"""
         user = self.get_user(user_id)
-        user['tokens_used'] = user.get('tokens_used', 0) + amount
-        self.save_users()
-
-    def add_photo_recognitions(self, user_id: int, amount: int):
-        user = self.get_user(user_id)
-        user['extra_photos'] = user.get('extra_photos', 0) + amount
-        self.save_users()
+        if user.get('admin_unlimited'):
+            return
+        tokens_used = user.get('tokens_used', 0) or 0
+        tokens_remaining = user.get('tokens_remaining', 0) or 0
+        new_tokens_used = int(tokens_used) + amount
+        new_tokens_remaining = max(0, int(tokens_remaining) - amount)
+        
+        if db_manager.update_user(user_id, tokens_used=new_tokens_used, tokens_remaining=new_tokens_remaining):
+            user['tokens_used'] = new_tokens_used
+            user['tokens_remaining'] = new_tokens_remaining
 
     def activate_subscription(self, user_id: int, plan_type: str, days: int = 30):
+        """Активирует подписку для пользователя"""
         if plan_type not in self.subscription_plans:
             return False
         
-        user = self.get_user(user_id)
-        user['subscription_type'] = plan_type
-        user['subscription_expires'] = (datetime.now() + timedelta(days=days)).isoformat()
-        user['photo_recognitions_used'] = 0 # Сбрасываем счетчик при новой подписке
-        user['tokens_used'] = 0
-        user['extra_photos'] = 0
-        self.save_users()
-        return True
+        now = datetime.now()
+        expires = now + timedelta(days=days)
+        plan_limits = self.subscription_plans[plan_type]
+        
+        update_data = {
+            'subscription_type': plan_type,
+            'subscription_start': now,
+            'subscription_end': expires,
+            'tokens_used': 0,
+            'requests_count': 0,
+            'yandex_requests_count': 0
+        }
+        
+        # Для LITE/PREMIUM устанавливаем лимит токенов
+        if plan_limits.get('max_tokens'):
+            update_data['tokens_remaining'] = plan_limits['max_tokens']
+        else:
+            # Для FREE устанавливаем дефолтное значение
+            update_data['tokens_remaining'] = 15000
+        
+        if db_manager.update_user(user_id, **update_data):
+            # Обновляем кеш
+            user = self.get_user(user_id)
+            user.update({k: v.isoformat() if isinstance(v, datetime) else v for k, v in update_data.items()})
+            return True
+        return False
 
     def get_user_info(self, user_id: int) -> str:
+        """Возвращает информацию о пользователе"""
         user = self.get_user(user_id)
         plan_type = user.get('subscription_type', 'free')
+        
+        expires_str = user.get('subscription_end')
+        if expires_str and datetime.fromisoformat(expires_str) < datetime.now():
+            plan_type = 'free'
+               
         plan_limits = self.subscription_plans.get(plan_type, self.subscription_plans['free'])
+        tokens_used = user.get('tokens_used', 0) or 0
+        tokens_remaining = user.get('tokens_remaining', 0) or 0
+        deepseek_count = user.get('requests_count', 0) or 0
+        yandex_count = user.get('yandex_requests_count', 0) or 0
         
-        if plan_type != 'free' and user['subscription_expires']:
-             expires = datetime.fromisoformat(user['subscription_expires'])
-             if expires < datetime.now():
-                 # Если подписка истекла, показываем как free
-                 plan_type = 'free'
-                 plan_limits = self.subscription_plans['free']
+        tokens_used = int(tokens_used)
+        tokens_remaining = int(tokens_remaining)
+        deepseek_count = int(deepseek_count)
+        yandex_count = int(yandex_count)
         
-        total_photo_limit = plan_limits['max_photo'] + user.get('extra_photos', 0)
-        photo_remaining = total_photo_limit - user['photo_recognitions_used']
-        tokens_used = user.get('tokens_used', 0)
-        
-        info = f"👤 **Ваш профиль**\n\n"
-        if plan_type == 'free':
-            info += f"💎 **Тариф:** Бесплатный\n"
-            info += f"📸 **Распознаваний осталось:** {photo_remaining} из {total_photo_limit}\n"
-            info += f"🪙 **Токенов использовано:** {tokens_used:,} из {plan_limits['max_tokens']:,}\n\n"
+        if user.get('admin_unlimited'):
+            info = "💎 Тариф: Безлимит (админ)\n"
+            info += "🤖 Запросов: ∞\n"
+            info += "📸 Запросов на решение по фото: ∞\n"
+            info += f"📈 Использовано токенов: {tokens_used:,}\n\n"
             info += "💡 Для снятия лимитов оформите подписку."
-        else:
-            days_left = (datetime.fromisoformat(user['subscription_expires']) - datetime.now()).days
-            info += f"💎 **Тариф:** {plan_type.capitalize()} (осталось {days_left} дн.)\n"
-            info += f"📸 **Распознаваний осталось:** {photo_remaining} из {total_photo_limit}\n"
-            info += f"🪙 **Токенов использовано:** {tokens_used:,} из {plan_limits['max_tokens']:,}\n\n"
+            return info
         
+        plan_name_map = {
+            'free': 'Бесплатный',
+            'lite': 'Lite',
+            'premium': 'Premium'
+        }
+        plan_label = plan_name_map.get(plan_type, plan_type.capitalize())
+        
+        if plan_type == 'free':
+            deepseek_limit = int(plan_limits.get('deepseek_max_requests') or 5)
+            deepseek_value = f"{max(0, deepseek_limit - deepseek_count)} из {deepseek_limit}"
+        else:
+            max_tokens = int(plan_limits.get('max_tokens') or 0)
+            deepseek_value = f"{tokens_remaining:,} токенов из {max_tokens:,}" if max_tokens else f"{tokens_remaining:,} токенов осталось"
+        
+        yandex_limit = int(plan_limits.get('yandex_max_requests') or 2)
+        yandex_value = f"{max(0, yandex_limit - yandex_count)} из {yandex_limit}"
+        
+        info = f"💎 Тариф: {plan_label}\n"
+        info += f"🤖 Запросов: {deepseek_value}\n"
+        info += f"📸 Запросов на решение по фото: {yandex_value}\n"
+        info += f"📈 Использовано токенов: {tokens_used:,}\n\n"
+        info += "💡 Для снятия лимитов оформите подписку."
         return info
 
     def reset_user_limits(self, user_id: int):
-        user = self.get_user(user_id)
-        user['subscription_type'] = 'free'
-        user['subscription_expires'] = None
-        user['photo_recognitions_used'] = 0
-        user['tokens_used'] = 0
-        user['extra_photos'] = 0
-        self.save_users()
-
-    def get_subscription_message(self, user_id: int, show_photo_limit_exceeded: bool = True) -> str:
-        header = "🚫 **Лимит на распознавание фото исчерпан!**\n\n" if show_photo_limit_exceeded else ""
+        """Сбрасывает лимиты пользователя до бесплатного тарифа"""
+        update_data = {
+            'subscription_type': 'free',
+            'subscription_start': None,
+            'subscription_end': None,
+            'tokens_used': 0,
+            'tokens_remaining': 15000,
+            'requests_count': 0,
+            'yandex_requests_count': 0
+        }
+        if db_manager.update_user(user_id, **update_data):
+            # Обновляем кеш
+            if str(user_id) in self.users_cache:
+                del self.users_cache[str(user_id)]
+            return True
+        return False
         
-        message = f"""{header}💎 **Наши тарифы:**
-- **Lite (199₽/мес):** 10 фото и 200,000 токенов.
-- **Pro (499₽/мес):** 50 фото и 1,000,000 токенов.
+    def grant_admin_unlimited(self, user_id: int) -> bool:
+        """Предоставляет пользователю безлимитный доступ"""
+        user = self.get_user(user_id)
+        if user.get('admin_unlimited'):
+            return True
+        user_id_str = str(user_id)
+        if db_manager.update_user(user_id, admin_unlimited=True):
+            user['admin_unlimited'] = True
+            self.users_cache[user_id_str] = user
+            return True
+        return False
+        
+    def get_subscription_message(self, photo: bool = False) -> str:
+        """Короткое сообщение-приглашение к покупке"""
+        prefix = "🚫 Лимит запросов по фото исчерпан!" if photo else "🚫 Лимит запросов исчерпан!"
+        message = f"""{prefix}
 
-📸 **Докупить распознавания:**
-- **10 фото:** 50₽
-- **25 фото:** 100₽
-
-Для покупки или продления подписки напишите администратору: [ссылка]"""
+🌟 Купите подписку или необходимое количество токенов."""
         return message

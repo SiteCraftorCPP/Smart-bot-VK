@@ -1,3 +1,26 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Виртуальные окружения
+venv/
+.venv/
+
+# Файлы окружения и секреты
+config.env
+.env
+.env.*
+
+# Локальные данные
+users.json
+users.json.migrated
+
+# IDE/OS мусор
+.vscode/
+.idea/
+*.log
+.DS_Store
+
 # Конфигурационные файлы с токенами
 config.env
 .env

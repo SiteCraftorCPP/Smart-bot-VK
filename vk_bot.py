@@ -9,6 +9,7 @@ from config import Config
 from user_manager import UserManager
 from deepseek_client import DeepSeekClient
 from yandex_vision_client import YandexVisionClient
+import time
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,6 +33,9 @@ class VKBot:
             self.deepseek = DeepSeekClient()
             self.vision_client = YandexVisionClient()
 
+            # Анти-дублирование исходящих сообщений: user_id -> (last_text, ts)
+            self._last_sent = {}
+
             logger.info("Бот инициализирован успешно")
         except ValueError as e:
             logger.error(f"Ошибка инициализации бота: {e}")
@@ -42,6 +46,14 @@ class VKBot:
         Отправляет сообщение пользователю с клавиатурой
         """
         try:
+            # Анти-дублирование: если то же сообщение отправлялось <2с назад — пропускаем
+            dedup_key = (user_id, (message or "").strip())
+            now_ts = time.time()
+            last = self._last_sent.get(user_id)
+            if last and last[0] == dedup_key[1] and (now_ts - last[1]) < 2.0:
+                logger.info("Пропускаем дублирующее исходящее сообщение (анти-дубль)")
+                return
+
             # Обрезаем сообщение если оно слишком длинное
             if len(message) > self.config.MAX_MESSAGE_LENGTH:
                 message = message[:self.config.MAX_MESSAGE_LENGTH-3] + "..."
@@ -61,6 +73,7 @@ class VKBot:
                     logger.error(f"Ошибка создания клавиатуры: {e}")
             
             self.vk.messages.send(**params)
+            self._last_sent[user_id] = (dedup_key[1], now_ts)
             logger.info(f"Сообщение отправлено пользователю {user_id}")
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения: {e}")
@@ -71,64 +84,32 @@ class VKBot:
         """
         logger.info(f"Обработка команды '{command}' от пользователя {user_id}")
         
-        # Разделяем команду и возможные аргументы
-        parts = command.split()
-        main_command = parts[0]
-        args = parts[1:]
+        admin_command = "adminpasdemkagg@ee11"
+        main_command = command.strip()
 
-        if main_command in ["help", "помощь"]:
-            user_info = self.user_manager.get_user_info(user_id)
-            help_text = f"""{user_info}
-
-📋 **Основные команды:**
-- `!help` или `!помощь` - это сообщение
-- `!subscribe` или `!подписка` - информация о тарифах
-- `!ping` - проверка работы бота
-- `!reset` или `!сброс` - сбросить историю диалога
-
-🤖 Для общения с AI просто напишите свой вопрос.
-📸 Для распознавания текста отправьте изображение.
-"""
-            self.send_message(user_id, help_text, self.get_main_keyboard())
-            
-        elif main_command in ["subscribe", "подписка"]:
-            sub_text = self.user_manager.get_subscription_message(user_id)
-            self.send_message(user_id, sub_text, self.get_main_keyboard())
-
-        elif main_command == "ping":
-            self.send_message(user_id, "Pong! 퐁!", self.get_main_keyboard())
-        
-        elif main_command in ["reset", "сброс"]:
-            self.user_manager.clear_history(user_id)
-            self.send_message(user_id, "✅ Контекст диалога был очищен.", self.get_main_keyboard())
-            
-        # Секретные команды для администратора
-        elif main_command == "besplatno52":
-            self.user_manager.reset_user_limits(user_id)
-            self.send_message(user_id, "✅ Ваши лимиты сброшены до бесплатного тарифа.", self.get_main_keyboard())
-            
-        elif main_command == "fofpan52":
-            self.user_manager.activate_subscription(user_id, 'pro')
-            self.send_message(user_id, f"✅ Подписка 'Pro' успешно активирована на 30 дней!", self.get_main_keyboard())
-
-        elif main_command == "add_photos":
-            if not args or not args[0].isdigit():
-                self.send_message(user_id, "Использование: `!add_photos <количество>`")
+        if main_command == admin_command:
+            user = self.user_manager.get_user(user_id)
+            if user.get('admin_unlimited'):
+                self.send_message(user_id, "✅ У вас уже есть безлимитный доступ.", self.get_main_keyboard())
                 return
-            amount = int(args[0])
-            self.user_manager.add_photo_recognitions(user_id, amount)
-            self.send_message(user_id, f"✅ Вам добавлено {amount} распознаваний фото.")
+            
+            if self.user_manager.grant_admin_unlimited(user_id):
+                self.send_message(user_id, "✅ Безлимитный доступ активирован.", self.get_main_keyboard())
+            else:
+                self.send_message(user_id, "❌ Не удалось активировать безлимитный доступ.", self.get_main_keyboard())
+        else:
+            self.send_message(user_id, "❌ Эта команда недоступна.", self.get_main_keyboard())
 
     def get_main_keyboard(self):
         """
         Создает главную клавиатуру
         """
         keyboard = VkKeyboard(one_time=False, inline=False)
-        keyboard.add_button('📋 Подписка', color=VkKeyboardColor.PRIMARY)
-        keyboard.add_button('🛠 Техподдержка', color=VkKeyboardColor.SECONDARY)
+        keyboard.add_button('🔥 Подписка', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_openlink_button('📞 Тех.Поддержка', 'https://vk.com/creativedgecpp')
         keyboard.add_line()
         keyboard.add_button('🪙 Токены', color=VkKeyboardColor.POSITIVE)
-        keyboard.add_button('❓ Помощь', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_button('👤 Профиль', color=VkKeyboardColor.POSITIVE)
         return keyboard
     
     def get_subscription_keyboard(self):
@@ -136,10 +117,12 @@ class VKBot:
         Создает клавиатуру подписки
         """
         keyboard = VkKeyboard(one_time=False)
-        keyboard.add_button('💎 Подписка Стандарт', color=VkKeyboardColor.PRIMARY)
-        keyboard.add_button('🪙 Докупить токены', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_button('🎓 Lite - 300₽/мес', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_button('⚡ Больше токенов', color=VkKeyboardColor.SECONDARY)
         keyboard.add_line()
-        keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('⭐ Premium - 449₽/мес', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_line()
+        keyboard.add_button('↩️ Назад', color=VkKeyboardColor.PRIMARY)
         return keyboard
     
     def get_back_keyboard(self):
@@ -147,7 +130,19 @@ class VKBot:
         Создает клавиатуру "Назад"
         """
         keyboard = VkKeyboard(one_time=False)
-        keyboard.add_button('🔙 Назад', color=VkKeyboardColor.NEGATIVE)
+        keyboard.add_button('↩️ Назад', color=VkKeyboardColor.PRIMARY)
+        return keyboard
+    
+    def get_tokens_shop_keyboard(self):
+        """
+        Клавиатура магазина токенов/запросов
+        """
+        keyboard = VkKeyboard(one_time=False)
+        keyboard.add_button('🪙 Купить 150.000 токенов', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_line()
+        keyboard.add_button('🪙 Купить 30 запросов на обработку фото', color=VkKeyboardColor.SECONDARY)
+        keyboard.add_line()
+        keyboard.add_button('↩️ Назад', color=VkKeyboardColor.PRIMARY)
         return keyboard
     
     def is_command(self, text: str) -> bool:
@@ -160,70 +155,40 @@ class VKBot:
         """
         Обрабатывает нажатия кнопок
         """
-        if text == "📋 Подписка":
-            message = """💎 **Меню подписки**
-
-Выберите действие:"""
+        if text == "🔥 Подписка":
+            # Отправляем нужный текст и показываем меню подписок
+            self.send_message(user_id, "👉Просто отправь свой вопрос и я отвечу на него!", self.get_subscription_keyboard())
+            
+            
+        elif text == "🎓 Lite - 300₽/мес":
+            message = """- 800.000 токенов в месяц.
+- 2 запроса на обработку фото.
+💳 Для оплаты нажмите: "Оплатить"."""
             self.send_message(user_id, message, self.get_subscription_keyboard())
             
-        elif text == "🛠 Техподдержка":
-            message = """🛠 **Техподдержка**
-
-По всем вопросам обращайтесь к нам:
-🔗 https://vk.com/creativedgecpp
-
-Мы поможем решить любые проблемы!"""
-            self.send_message(user_id, message, self.get_back_keyboard())
-            
-        elif text == "💎 Подписка Стандарт":
-            message = """💎 **Подписка Стандарт**
-
-💰 **Стоимость:** 299₽/месяц
-
-✅ **Включено:**
-• 1,000,000 токенов в месяц
-• Приоритетная поддержка
-• Расширенные возможности AI
-• Безлимитные команды
-
-💳 **Для оплаты напишите:** "Оплатить подписку"
-Мы свяжемся с вами для оформления платежа."""
+        elif text == "⭐ Premium - 449₽/мес":
+            message = """- 1.000.000 токенов в месяц.
+- 50 запросов на обработку фото.
+- Приоритетная поддержка
+- Расширенные возможности AI
+💳 Для оплаты нажмите: "Оплатить"."""
             self.send_message(user_id, message, self.get_subscription_keyboard())
             
-        elif text == "🪙 Докупить токены" or text == "📸 Докупить фото": # "Докупить токены" для обратной совместимости
-            message = self.user_manager.get_subscription_message(user_id, show_photo_limit_exceeded=False)
-            self.send_message(user_id, message, self.get_subscription_keyboard())
+        elif text == "⚡ Больше токенов" or text == "🪙 Докупить токены" or text == "📸 Докупить фото": # "Докупить токены" для обратной совместимости
+            # Открываем магазин токенов
+            self.send_message(user_id, "🪙 Выберите нужный пакет", self.get_tokens_shop_keyboard())
             
         elif text == "🪙 Токены" or text == "📸 Фото и токены":
-            # Показываем информацию о токенах
+            # Открываем магазин токенов
+            self.send_message(user_id, "🪙 Выберите нужный пакет", self.get_tokens_shop_keyboard())
+            
+        elif text == "👤 Профиль":
+            # Показываем статус подписки и лимиты из БД
             user_info = self.user_manager.get_user_info(user_id)
             self.send_message(user_id, user_info, self.get_main_keyboard())
             
-        elif text == "❓ Помощь":
-            # Добавляем информацию о пользователе
-            user_info = self.user_manager.get_user_info(user_id)
-            message = f"""❓ **Помощь**
-
-{user_info}
-
-🤖 **Основные функции:**
-• Общение с AI (просто напишите сообщение)
-• Команды: !ping, !help, !status, !tokens
-• Подписка и покупка токенов
-
-📋 **Кнопки:**
-• **Подписка** - оформить подписку или купить токены
-• **Техподдержка** - связаться с нами
-• **Токены** - показать информацию о токенах
-• **Помощь** - эта справка
-
-💡 **Совет:** Используйте кнопки для удобной навигации!"""
-            self.send_message(user_id, message, self.get_main_keyboard())
-            
-        elif text == "🔙 Назад":
-            message = """🏠 **Главное меню**
-
-Выберите действие:"""
+        elif text == "↩️ Назад":
+            message = "🏠 Главное меню"
             self.send_message(user_id, message, self.get_main_keyboard())
             
         else:
@@ -291,16 +256,22 @@ class VKBot:
         """
         Обрабатывает входящее текстовое сообщение
         """
+        # Проверяем, новый ли это пользователь, и обновляем его профиль
+        user_data = self.user_manager.get_user(user_id)
+        if not user_data.get('full_name') or not user_data.get('profile_link'):
+            self.user_manager.update_user_profile_from_vk(user_id, self.vk)
+
         # Проверяем, не является ли сообщение командой
         if text.startswith(self.config.BOT_PREFIX):
             command = text[len(self.config.BOT_PREFIX):].lower().strip()
             await self.process_command(user_id, command)
             return
 
-        # Проверяем лимит токенов перед запросом
-        can_request, message = self.user_manager.check_token_limit(user_id)
+        # Проверяем лимит перед запросом к DeepSeek
+        # Для FREE проверяем количество запросов, для LITE/PREMIUM - токены
+        can_request, message = self.user_manager.can_make_deepseek_request(user_id)
         if not can_request:
-            self.send_message(user_id, message)
+            self.send_message(user_id, message, self.get_main_keyboard())
             return
 
         # Получаем историю диалога
@@ -348,18 +319,13 @@ class VKBot:
             # Проверяем, был ли ответ успешным
             if tokens_used > 0:
                 # Успех: сохраняем диалог в историю и тратим лимиты
+                # Для всех тарифов тратим токены
                 self.user_manager.increment_token_usage(user_id, tokens_used)
+                # Для FREE увеличиваем счетчик запросов к DeepSeek
+                self.user_manager.increment_deepseek_request_count(user_id)
                 self.user_manager.add_to_history(user_id, "user", text)
                 self.user_manager.add_to_history(user_id, "assistant", response)
 
-                # Если это был ответ на фото, добавляем инфо о лимитах на фото
-                if is_photo_recognition:
-                    user = self.user_manager.get_user(user_id)
-                    plan_type = user.get('subscription_type', 'free')
-                    plan_limits = self.user_manager.subscription_plans.get(plan_type, self.user_manager.subscription_plans['free'])
-                    remaining = plan_limits['max_photo'] - user['photo_recognitions_used']
-                    response += f"\n\n📸 **Распознаваний осталось:** {remaining} из {plan_limits['max_photo']}"
-                
                 self.send_message(user_id, response, self.get_main_keyboard())
             else:
                 # Ошибка: показываем сообщение об ошибке, не сохраняем в историю
@@ -367,7 +333,7 @@ class VKBot:
                 
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения: {e}")
-            self.send_message(user_id, "Произошла ошибка при обработке вашего сообщения.", self.get_main_keyboard())
+            self.send_message(user_id, "❌ Произошла ошибка при обработке вашего сообщения.", self.get_main_keyboard())
     
     def run(self):
         """
@@ -418,7 +384,7 @@ class VKBot:
                             asyncio.run(self.handle_message(user_id, text))
                         except Exception as e:
                             logger.error(f"Ошибка обработки сообщения: {e}")
-                            self.send_message(user_id, "Произошла ошибка при обработке сообщения.")
+                            self.send_message(user_id, "❌ Произошла ошибка при обработке сообщения.")
                 else:
                     logger.info(f"Игнорируем событие типа: {event.type}")
                         
@@ -448,13 +414,13 @@ class VKBot:
         Обрабатывает сообщение с изображением.
         """
         if not image_url:
-            self.send_message(user_id, "Не удалось получить ссылку на изображение.")
+            self.send_message(user_id, "❌ Не удалось получить ссылку на изображение.")
             return
 
-        # Проверяем, может ли пользователь распознать фото
-        can_recognize, message = self.user_manager.can_recognize_photo(user_id)
-        if not can_recognize:
-            self.send_message(user_id, message)
+        # Проверяем лимит запросов к Yandex Vision
+        can_request, message = self.user_manager.can_make_yandex_request(user_id)
+        if not can_request:
+            self.send_message(user_id, message, self.get_main_keyboard())
             return
 
         # Отправляем временное сообщение
@@ -475,6 +441,9 @@ class VKBot:
         # Распознаем текст
         recognized_text = self.vision_client.recognize_text(image_url)
         
+        # Увеличиваем счетчик запросов к Yandex (для всех тарифов)
+        self.user_manager.increment_yandex_request_count(user_id)
+        
         # Удаляем временное сообщение
         if thinking_id:
             try:
@@ -484,11 +453,8 @@ class VKBot:
 
         if not recognized_text or "Ошибка" in recognized_text:
             logger.warning(f"Текст на изображении не распознан или произошла ошибка: {recognized_text}")
-            self.send_message(user_id, f"Не удалось распознать текст на изображении. \n({recognized_text})")
+            self.send_message(user_id, f"❌ Не удалось распознать текст на изображении. \n({recognized_text})")
             return
-            
-        # Успех! Списываем попытку распознавания.
-        self.user_manager.increment_photo_usage(user_id)
         
         # Формируем новый промпт для DeepSeek, учитывая текст пользователя
         if user_text:
