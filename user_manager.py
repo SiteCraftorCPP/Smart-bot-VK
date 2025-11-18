@@ -22,8 +22,8 @@ class UserManager:
             # Возвращаем запасной вариант, если БД недоступна
             return {
                'free': {'max_tokens': None, 'deepseek_max_requests': 5, 'yandex_max_requests': 2, 'price': 0},
-               'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 300},
-               'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 449}
+               'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 200},
+               'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 300}
             }
         logger.info("Тарифные планы успешно загружены из БД.")
         return plans
@@ -119,9 +119,25 @@ class UserManager:
         if expires_str:
             try:
                 if datetime.fromisoformat(expires_str) < datetime.now():
-                    self.reset_user_limits(user_id)
-                    user = self.get_user(user_id)
-                    plan_type = 'free'
+                    # НЕ сбрасываем токены полностью, сохраняем купленные токены
+                    # Просто переводим на free тариф
+                    # Сообщаем пользователю об окончании подписки
+                    if db_manager.update_user(user_id, subscription_type='free', subscription_start=None, subscription_end=None):
+                        user = self.get_user(user_id)
+                        plan_type = 'free'
+                        
+                        # Проверяем, остались ли у пользователя купленные токены
+                        tokens_remaining = user.get('tokens_remaining', 0) or 0
+                        if tokens_remaining > 0:
+                            return False, f"""🔔 Ваша подписка истекла!
+
+💰 У вас осталось {tokens_remaining:,} токенов, которые сохранены.
+
+Для использования бота:
+1️⃣ Обновите подписку
+2️⃣ Или используйте оставшиеся токены (доступно только с активной подпиской)
+
+🔄 Нажмите "🔥 Подписка" для продления."""
             except (ValueError, TypeError):
                 pass
             
@@ -164,9 +180,11 @@ class UserManager:
         if expires_str:
             try:
                 if datetime.fromisoformat(expires_str) < datetime.now():
-                    self.reset_user_limits(user_id)
-                    user = self.get_user(user_id)
-                    plan_type = 'free'
+                    # НЕ сбрасываем лимиты полностью, сохраняем купленные токены и фото-запросы
+                    # Просто переводим на free тариф
+                    if db_manager.update_user(user_id, subscription_type='free', subscription_start=None, subscription_end=None):
+                        user = self.get_user(user_id)
+                        plan_type = 'free'
             except (ValueError, TypeError):
                 pass
             
@@ -174,6 +192,7 @@ class UserManager:
 
         if user.get('admin_unlimited'):
             return True, ""
+        
         yandex_limit = plan_limits.get('yandex_max_requests')
         if yandex_limit is None:
             yandex_limit = 2
@@ -181,8 +200,12 @@ class UserManager:
         if yandex_count is None:
             yandex_count = 0
         
-        if yandex_count < yandex_limit:
-            remaining = yandex_limit - yandex_count
+        # Добавляем купленные фото-запросы к лимиту
+        purchased_photo = user.get('purchased_photo_requests', 0) or 0
+        total_limit = yandex_limit + purchased_photo
+        
+        if yandex_count < total_limit:
+            remaining = total_limit - yandex_count
             return True, f"Доступно запросов к Yandex: {remaining}"
         else:
             return False, self.get_subscription_message(photo=True)
@@ -360,6 +383,14 @@ class UserManager:
             return True
         return False
         
+    def add_tokens(self, user_id: int, amount: int) -> bool:
+        """Добавляет токены пользователю"""
+        return db_manager.add_tokens(user_id, amount)
+    
+    def add_photo_requests(self, user_id: int, amount: int) -> bool:
+        """Добавляет фото-запросы пользователю"""
+        return db_manager.add_photo_requests(user_id, amount)
+    
     def get_subscription_message(self, photo: bool = False) -> str:
         """Короткое сообщение-приглашение к покупке"""
         prefix = "🚫 Лимит запросов по фото исчерпан!" if photo else "🚫 Лимит запросов исчерпан!"

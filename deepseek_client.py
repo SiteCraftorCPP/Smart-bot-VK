@@ -10,25 +10,48 @@ logger = logging.getLogger(__name__)
 
 class DeepSeekClient:
     def __init__(self):
-        self.api_key = Config.DEEPSEEK_API_KEY
+        # Поддержка нескольких API ключей для распределения нагрузки
+        self.api_keys = [
+            Config.DEEPSEEK_API_KEY,
+            Config.DEEPSEEK_API_KEY_2,
+            Config.DEEPSEEK_API_KEY_3
+        ]
+        # Фильтруем пустые ключи
+        self.api_keys = [key for key in self.api_keys if key]
+        
+        if not self.api_keys:
+            logger.warning("⚠️ Нет доступных API ключей DeepSeek!")
+        
         self.base_url = Config.DEEPSEEK_BASE_URL
-        self.headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
+        self.current_key_index = 0
+    
+    def _get_next_api_key(self) -> tuple:
+        """Возвращает следующий API ключ по кругу (round-robin)
+        Returns: (api_key, key_index)"""
+        if not self.api_keys:
+            return None, -1
+        
+        current_index = self.current_key_index
+        api_key = self.api_keys[current_index]
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        return api_key, current_index
     
     async def generate_response(self, messages: list) -> (str, int):
         """
         Генерирует ответ от DeepSeek на основе истории сообщений.
         Возвращает ответ и количество использованных токенов.
+        Использует round-robin для распределения запросов между API ключами.
         """
-        if not self.api_key:
+        api_key, key_index = self._get_next_api_key()
+        if not api_key:
             return "Нет ключа DeepSeek API", 0
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
+            "Authorization": f"Bearer {api_key}"
         }
+        
+        logger.info(f"Используется API ключ #{key_index + 1} из {len(self.api_keys)}")
 
         # Формируем промпт с контекстом
         system_prompt = "Ты — полезный ИИ-ассистент в боте для ВКонтакте. Твои ответы должны быть только в формате простого текста. Не используй Markdown, LaTeX или любые другие виды форматирования. Для математических формул и символов используй символы Unicode (например, Δ, Ω, ≈, →, α) вместо команд LaTeX (например, \\Delta, \\Omega, \\approx, \\rightarrow, \\alpha). Ответы давай на русском языке. Всегда уделяй первостепенное внимание последнему сообщению от пользователя. Если оно представляет собой новый вопрос или тему, отвечай на него, даже если это противоречит предыдущему контексту."

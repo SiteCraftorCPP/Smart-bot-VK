@@ -106,8 +106,8 @@ class DatabaseManager:
                 INSERT INTO subscription_plans (plan_name, max_tokens, deepseek_max_requests, yandex_max_requests, price) 
                 VALUES 
                     ('free', NULL, 5, 2, 0.00),
-                    ('lite', 800000, NULL, 2, 300.00),
-                    ('premium', 1000000, NULL, 50, 449.00)
+                    ('lite', 800000, NULL, 2, 200.00),
+                    ('premium', 1000000, NULL, 50, 300.00)
                 ON CONFLICT (plan_name) DO UPDATE SET
                     max_tokens = EXCLUDED.max_tokens,
                     deepseek_max_requests = EXCLUDED.deepseek_max_requests,
@@ -317,8 +317,8 @@ class DatabaseManager:
             # Возвращаем планы по умолчанию для JSON режима
             return {
                 'free': {'max_tokens': None, 'deepseek_max_requests': 5, 'yandex_max_requests': 2, 'price': 0},
-                'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 199},
-                'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 449}
+                'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 200},
+                'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 300}
             }
             
         conn = self.get_connection()
@@ -363,6 +363,57 @@ class DatabaseManager:
             return self.update_user(user_id, **update_data)
         return True
 
+    def add_tokens(self, user_id: int, amount: int) -> bool:
+        """Добавляет токены пользователю"""
+        user = self.get_user(user_id)
+        if not user:
+            return False
+        
+        current_tokens = user.get('tokens_remaining', 0) or 0
+        new_tokens = current_tokens + amount
+        
+        return self.update_user(user_id, tokens_remaining=new_tokens)
+    
+    def add_photo_requests(self, user_id: int, amount: int) -> bool:
+        """Добавляет фото-запросы пользователю (увеличивает лимит Yandex)"""
+        # Для этого мы будем хранить дополнительное поле purchased_photo_requests
+        conn = self.get_connection()
+        if not conn:
+            # Для JSON режима
+            if not self.use_postgres:
+                users = self._load_users()
+                user_id_str = str(user_id)
+                if user_id_str in users:
+                    current = users[user_id_str].get('purchased_photo_requests', 0) or 0
+                    users[user_id_str]['purchased_photo_requests'] = current + amount
+                    return self._save_users(users)
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            
+            # Добавляем столбец если его нет
+            cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS purchased_photo_requests INTEGER DEFAULT 0;")
+            
+            # Обновляем значение
+            cursor.execute("""
+                UPDATE users 
+                SET purchased_photo_requests = COALESCE(purchased_photo_requests, 0) + %s,
+                    last_activity = CURRENT_TIMESTAMP
+                WHERE user_id = %s
+            """, (amount, user_id))
+            
+            conn.commit()
+            cursor.close()
+            return True
+            
+        except (Exception, psycopg2.DatabaseError) as err:
+            conn.rollback()
+            logger.error(f"❌ Ошибка добавления фото-запросов пользователю {user_id}: {err}")
+            return False
+        finally:
+            self.put_connection(conn)
+    
     def close(self):
         """Закрывает все соединения в пуле"""
         if self.connection_pool:

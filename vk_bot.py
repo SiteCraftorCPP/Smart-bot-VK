@@ -9,6 +9,7 @@ from config import Config
 from user_manager import UserManager
 from deepseek_client import DeepSeekClient
 from yandex_vision_client import YandexVisionClient
+from yookassa_client import YooKassaClient
 import time
 
 # Настройка логирования
@@ -32,9 +33,13 @@ class VKBot:
             self.user_manager = UserManager()
             self.deepseek = DeepSeekClient()
             self.vision_client = YandexVisionClient()
+            self.yookassa = YooKassaClient()
 
             # Анти-дублирование исходящих сообщений: user_id -> (last_text, ts)
             self._last_sent = {}
+            
+            # Хранилище ожидающих платежей: user_id -> {'payment_id': str, 'type': str, 'amount': float}
+            self.pending_payments = {}
 
             logger.info("Бот инициализирован успешно")
         except ValueError as e:
@@ -117,10 +122,42 @@ class VKBot:
         Создает клавиатуру подписки
         """
         keyboard = VkKeyboard(one_time=False)
-        keyboard.add_button('🎓 Lite - 300₽/мес', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_button('🎓 Lite - 200₽/мес', color=VkKeyboardColor.POSITIVE)
         keyboard.add_button('⚡ Больше токенов', color=VkKeyboardColor.SECONDARY)
         keyboard.add_line()
-        keyboard.add_button('⭐ Premium - 449₽/мес', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_button('⭐ Premium - 300₽/мес', color=VkKeyboardColor.POSITIVE)
+        keyboard.add_line()
+        keyboard.add_button('↩️ Назад', color=VkKeyboardColor.PRIMARY)
+        return keyboard
+    
+    def get_payment_keyboard(self, payment_type: str, payment_url: str = None):
+        """
+        Создает клавиатуру с кнопкой оплаты
+        Если payment_url указан, создает inline-кнопку для прямого перехода
+        """
+        keyboard = VkKeyboard(one_time=False, inline=(payment_url is not None))
+        
+        if payment_url:
+            # Inline-кнопка для прямого перехода на оплату
+            if payment_type == 'lite':
+                keyboard.add_openlink_button('💳 Оплатить Lite', payment_url)
+            elif payment_type == 'premium':
+                keyboard.add_openlink_button('💳 Оплатить Premium', payment_url)
+            elif payment_type == 'tokens':
+                keyboard.add_openlink_button('💳 Оплатить токены', payment_url)
+            elif payment_type == 'photo':
+                keyboard.add_openlink_button('💳 Оплатить фото', payment_url)
+        else:
+            # Обычная кнопка для создания платежа
+            if payment_type == 'lite':
+                keyboard.add_button('💳 Оплатить Lite', color=VkKeyboardColor.POSITIVE)
+            elif payment_type == 'premium':
+                keyboard.add_button('💳 Оплатить Premium', color=VkKeyboardColor.POSITIVE)
+            elif payment_type == 'tokens':
+                keyboard.add_button('💳 Оплатить токены', color=VkKeyboardColor.POSITIVE)
+            elif payment_type == 'photo':
+                keyboard.add_button('💳 Оплатить фото', color=VkKeyboardColor.POSITIVE)
+        
         keyboard.add_line()
         keyboard.add_button('↩️ Назад', color=VkKeyboardColor.PRIMARY)
         return keyboard
@@ -160,19 +197,138 @@ class VKBot:
             self.send_message(user_id, "👉Просто отправь свой вопрос и я отвечу на него!", self.get_subscription_keyboard())
             
             
-        elif text == "🎓 Lite - 300₽/мес":
-            message = """- 800.000 токенов в месяц.
-- 2 запроса на обработку фото.
-💳 Для оплаты нажмите: "Оплатить"."""
-            self.send_message(user_id, message, self.get_subscription_keyboard())
+        elif text == "🎓 Lite - 200₽/мес":
+            message = """🎓 Подписка Lite - 200₽/мес
+
+✅ Что включено:
+- 800.000 токенов в месяц
+- 2 запроса на обработку фото
+
+💳 Нажмите кнопку "Оплатить Lite" для оплаты."""
+            self.send_message(user_id, message, self.get_payment_keyboard('lite'))
             
-        elif text == "⭐ Premium - 449₽/мес":
-            message = """- 1.000.000 токенов в месяц.
-- 50 запросов на обработку фото.
+        elif text == "⭐ Premium - 300₽/мес":
+            message = """⭐ Подписка Premium - 300₽/мес
+
+✅ Что включено:
+- 1.000.000 токенов в месяц
+- 50 запросов на обработку фото
 - Приоритетная поддержка
 - Расширенные возможности AI
-💳 Для оплаты нажмите: "Оплатить"."""
-            self.send_message(user_id, message, self.get_subscription_keyboard())
+
+💳 Нажмите кнопку "Оплатить Premium" для оплаты."""
+            self.send_message(user_id, message, self.get_payment_keyboard('premium'))
+            
+        elif text == "🪙 Купить 150.000 токенов":
+            message = """🪙 Покупка токенов
+
+💰 Сумма: 60₽
+📦 Количество: 150.000 токенов
+
+💳 Нажмите кнопку "Оплатить токены" для оплаты."""
+            self.send_message(user_id, message, self.get_payment_keyboard('tokens'))
+            
+        elif text == "🪙 Купить 30 запросов на обработку фото":
+            message = """📸 Покупка запросов на обработку фото
+
+💰 Сумма: 60₽
+📦 Количество: 30 запросов
+
+💳 Нажмите кнопку "Оплатить фото" для оплаты."""
+            self.send_message(user_id, message, self.get_payment_keyboard('photo'))
+        
+        elif text == "💳 Оплатить Lite" or text == "Оплатить Lite":
+            # Создаем платеж для Lite подписки
+            payment = self.yookassa.create_payment(200.0, "Подписка Lite на 1 месяц", user_id, "lite")
+            if payment:
+                payment_url = payment['confirmation']['confirmation_url']
+                self.pending_payments[user_id] = {
+                    'payment_id': payment['id'],
+                    'type': 'lite',
+                    'amount': 0
+                }
+                message = "💳 Оплата подписки Lite - 200₽\n\nНажмите кнопку ниже для перехода к оплате.\n\nПосле оплаты подписка будет автоматически активирована.\n\n💡 После оплаты напишите 'проверить оплату' для подтверждения."
+                self.send_message(user_id, message, self.get_payment_keyboard('lite', payment_url))
+            else:
+                message = "❌ Ошибка создания платежа. Проверьте настройки ЮКассы в config.env\n\nУбедитесь, что:\n- YOOKASSA_SHOP_ID указан правильно\n- YOOKASSA_API_KEY указан правильно"
+                self.send_message(user_id, message, self.get_payment_keyboard('lite'))
+        
+        elif text == "💳 Оплатить Premium" or text == "Оплатить Premium":
+            # Создаем платеж для Premium подписки
+            payment = self.yookassa.create_payment(300.0, "Подписка Premium на 1 месяц", user_id, "premium")
+            if payment:
+                payment_url = payment['confirmation']['confirmation_url']
+                self.pending_payments[user_id] = {
+                    'payment_id': payment['id'],
+                    'type': 'premium',
+                    'amount': 0
+                }
+                message = "💳 Оплата подписки Premium - 300₽\n\nНажмите кнопку ниже для перехода к оплате.\n\nПосле оплаты подписка будет автоматически активирована.\n\n💡 После оплаты напишите 'проверить оплату' для подтверждения."
+                self.send_message(user_id, message, self.get_payment_keyboard('premium', payment_url))
+            else:
+                message = "❌ Ошибка создания платежа. Проверьте настройки ЮКассы в config.env\n\nУбедитесь, что:\n- YOOKASSA_SHOP_ID указан правильно\n- YOOKASSA_API_KEY указан правильно"
+                self.send_message(user_id, message, self.get_payment_keyboard('premium'))
+        
+        elif text == "💳 Оплатить токены" or text == "Оплатить токены":
+            # Создаем платеж для токенов
+            payment = self.yookassa.create_payment(60.0, "Покупка 150.000 токенов", user_id, "tokens")
+            if payment:
+                payment_url = payment['confirmation']['confirmation_url']
+                self.pending_payments[user_id] = {
+                    'payment_id': payment['id'],
+                    'type': 'tokens',
+                    'amount': 150000
+                }
+                message = "💳 Оплата токенов - 60₽\n\nНажмите кнопку ниже для перехода к оплате.\n\nПосле оплаты вам будет начислено 150.000 токенов.\n\n💡 После оплаты напишите 'проверить оплату' для подтверждения."
+                self.send_message(user_id, message, self.get_payment_keyboard('tokens', payment_url))
+            else:
+                message = "❌ Ошибка создания платежа. Проверьте настройки ЮКассы в config.env\n\nУбедитесь, что:\n- YOOKASSA_SHOP_ID указан правильно\n- YOOKASSA_API_KEY указан правильно"
+                self.send_message(user_id, message, self.get_payment_keyboard('tokens'))
+        
+        elif text == "💳 Оплатить фото" or text == "Оплатить фото":
+            # Создаем платеж для фото-запросов
+            payment = self.yookassa.create_payment(60.0, "Покупка 30 запросов на обработку фото", user_id, "photo")
+            if payment:
+                payment_url = payment['confirmation']['confirmation_url']
+                self.pending_payments[user_id] = {
+                    'payment_id': payment['id'],
+                    'type': 'photo',
+                    'amount': 30
+                }
+                message = "💳 Оплата фото-запросов - 60₽\n\nНажмите кнопку ниже для перехода к оплате.\n\nПосле оплаты вам будет начислено 30 запросов на обработку фото.\n\n💡 После оплаты напишите 'проверить оплату' для подтверждения."
+                self.send_message(user_id, message, self.get_payment_keyboard('photo', payment_url))
+            else:
+                message = "❌ Ошибка создания платежа. Проверьте настройки ЮКассы в config.env\n\nУбедитесь, что:\n- YOOKASSA_SHOP_ID указан правильно\n- YOOKASSA_API_KEY указан правильно"
+                self.send_message(user_id, message, self.get_payment_keyboard('photo'))
+        
+        elif text.lower() == "проверить оплату":
+            # Проверяем статус платежа
+            if user_id in self.pending_payments:
+                payment_info = self.pending_payments[user_id]
+                payment_id = payment_info['payment_id']
+                
+                if self.yookassa.is_payment_succeeded(payment_id):
+                    payment_type = payment_info['type']
+                    amount = payment_info['amount']
+                    
+                    if payment_type == 'tokens':
+                        self.user_manager.add_tokens(user_id, amount)
+                        message = f"✅ Платеж успешно завершен! Вам начислено {amount:,} токенов."
+                    elif payment_type == 'photo':
+                        self.user_manager.add_photo_requests(user_id, amount)
+                        message = f"✅ Платеж успешно завершен! Вам начислено {amount} запросов на обработку фото."
+                    elif payment_type in ['lite', 'premium']:
+                        self.user_manager.activate_subscription(user_id, payment_type, 30)
+                        message = f"✅ Платеж успешно завершен! Подписка {payment_type.capitalize()} активирована на 30 дней."
+                    else:
+                        message = "✅ Платеж успешно завершен!"
+                    
+                    del self.pending_payments[user_id]
+                else:
+                    message = "⏳ Платеж еще не завершен. Попробуйте позже."
+            else:
+                message = "❌ У вас нет ожидающих платежей."
+            self.send_message(user_id, message, self.get_main_keyboard())
             
         elif text == "⚡ Больше токенов" or text == "🪙 Докупить токены" or text == "📸 Докупить фото": # "Докупить токены" для обратной совместимости
             # Открываем магазин токенов
@@ -282,6 +438,7 @@ class VKBot:
         try:
             # Отправляем "Думаю..."
             thinking_id = None
+            thinking_peer_id = None
             try:
                 thinking_message = self.vk.messages.send(
                     user_id=user_id,
@@ -293,6 +450,9 @@ class VKBot:
                     thinking_id = thinking_message
                 elif isinstance(thinking_message, dict):
                     thinking_id = thinking_message.get('message_id')
+                
+                # Получаем peer_id для редактирования сообщения
+                thinking_peer_id = user_id
 
                 if thinking_id:
                     logger.info(f"Отправлено сообщение 'Думаю...' (id: {thinking_id}) для пользователя {user_id}")
@@ -305,17 +465,6 @@ class VKBot:
             # Получаем ответ от DeepSeek
             response, tokens_used = await self.deepseek.generate_response(api_call_history)
             
-            # Удаляем сообщение "Думаю..." если оно было отправлено
-            if thinking_id:
-                try:
-                    self.vk.messages.delete(
-                        message_ids=[thinking_id],
-                        delete_for_all=1
-                    )
-                    logger.info(f"Удалено сообщение 'Думаю...' (id: {thinking_id}) для пользователя {user_id}")
-                except Exception as e:
-                    logger.error(f"Ошибка удаления сообщения (id: {thinking_id}): {e}")
-            
             # Проверяем, был ли ответ успешным
             if tokens_used > 0:
                 # Успех: сохраняем диалог в историю и тратим лимиты
@@ -326,10 +475,51 @@ class VKBot:
                 self.user_manager.add_to_history(user_id, "user", text)
                 self.user_manager.add_to_history(user_id, "assistant", response)
 
-                self.send_message(user_id, response, self.get_main_keyboard())
+                # Редактируем сообщение "Думаю..." вместо удаления
+                if thinking_id and thinking_peer_id:
+                    try:
+                        # Обрезаем ответ если он слишком длинный
+                        if len(response) > self.config.MAX_MESSAGE_LENGTH:
+                            response = response[:self.config.MAX_MESSAGE_LENGTH-3] + "..."
+                        
+                        self.vk.messages.edit(
+                            peer_id=thinking_peer_id,
+                            message_id=thinking_id,
+                            message=response,
+                            keyboard=self.get_main_keyboard().get_keyboard() if hasattr(self.get_main_keyboard(), 'get_keyboard') else None
+                        )
+                        logger.info(f"Отредактировано сообщение (id: {thinking_id}) для пользователя {user_id}")
+                    except Exception as e:
+                        logger.error(f"Ошибка редактирования сообщения (id: {thinking_id}): {e}")
+                        # Если редактирование не удалось, удаляем старое и отправляем новое
+                        try:
+                            self.vk.messages.delete(message_ids=[thinking_id], delete_for_all=1)
+                        except:
+                            pass
+                        self.send_message(user_id, response, self.get_main_keyboard())
+                else:
+                    # Если не было сообщения "Думаю...", просто отправляем ответ
+                    self.send_message(user_id, response, self.get_main_keyboard())
             else:
-                # Ошибка: показываем сообщение об ошибке, не сохраняем в историю
-                self.send_message(user_id, response, self.get_main_keyboard())
+                # Ошибка: редактируем сообщение "Думаю..." на сообщение об ошибке
+                if thinking_id and thinking_peer_id:
+                    try:
+                        self.vk.messages.edit(
+                            peer_id=thinking_peer_id,
+                            message_id=thinking_id,
+                            message=response
+                        )
+                        logger.info(f"Отредактировано сообщение на ошибку (id: {thinking_id})")
+                    except Exception as e:
+                        logger.error(f"Ошибка редактирования сообщения об ошибке: {e}")
+                        # Если редактирование не удалось, удаляем старое и отправляем новое
+                        try:
+                            self.vk.messages.delete(message_ids=[thinking_id], delete_for_all=1)
+                        except:
+                            pass
+                        self.send_message(user_id, response, self.get_main_keyboard())
+                else:
+                    self.send_message(user_id, response, self.get_main_keyboard())
                 
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения: {e}")
