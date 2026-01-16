@@ -1,9 +1,8 @@
 requests==2.31.0
 python-dotenv==1.0.0
-asyncio
-aiohttp==3.8.6
+aiohttp>=3.8.6
 PyJWT==2.8.0
 cryptography==42.0.8
 psycopg2-binary==2.9.7
-vk_api
+vk-api>=11.10.0
 flask==3.0.0

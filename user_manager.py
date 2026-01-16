@@ -22,8 +22,8 @@ class UserManager:
             # Возвращаем запасной вариант, если БД недоступна
             return {
                'free': {'max_tokens': None, 'deepseek_max_requests': 5, 'yandex_max_requests': 2, 'price': 0},
-               'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 200},
-               'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 300}
+               'lite': {'max_tokens': 250000, 'deepseek_max_requests': None, 'yandex_max_requests': 10, 'price': 149},
+               'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 299}
             }
         logger.info("Тарифные планы успешно загружены из БД.")
         return plans

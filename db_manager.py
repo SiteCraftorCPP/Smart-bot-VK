@@ -106,8 +106,8 @@ class DatabaseManager:
                 INSERT INTO subscription_plans (plan_name, max_tokens, deepseek_max_requests, yandex_max_requests, price) 
                 VALUES 
                     ('free', NULL, 5, 2, 0.00),
-                    ('lite', 800000, NULL, 2, 200.00),
-                    ('premium', 1000000, NULL, 50, 300.00)
+                    ('lite', 250000, NULL, 10, 149.00),
+                    ('premium', 1000000, NULL, 50, 299.00)
                 ON CONFLICT (plan_name) DO UPDATE SET
                     max_tokens = EXCLUDED.max_tokens,
                     deepseek_max_requests = EXCLUDED.deepseek_max_requests,
@@ -317,8 +317,8 @@ class DatabaseManager:
             # Возвращаем планы по умолчанию для JSON режима
             return {
                 'free': {'max_tokens': None, 'deepseek_max_requests': 5, 'yandex_max_requests': 2, 'price': 0},
-                'lite': {'max_tokens': 800000, 'deepseek_max_requests': None, 'yandex_max_requests': 2, 'price': 200},
-                'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 300}
+                'lite': {'max_tokens': 250000, 'deepseek_max_requests': None, 'yandex_max_requests': 10, 'price': 149},
+                'premium': {'max_tokens': 1000000, 'deepseek_max_requests': None, 'yandex_max_requests': 50, 'price': 299}
             }
             
         conn = self.get_connection()

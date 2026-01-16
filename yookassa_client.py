@@ -1,7 +1,7 @@
 import requests
 import uuid
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class YooKassaClient:
             logger.error("❌ YOOKASSA_API_KEY не настроен!")
             logger.error("   Проверьте config.env - должен быть указан полный ключ")
         
-    def create_payment(self, amount: float, description: str, user_id: int, payment_type: str) -> Optional[Dict]:
+    def create_payment(self, amount: float, description: str, user_id: int, payment_type: str) -> Tuple[Optional[Dict], Optional[str]]:
         """
         Создает платеж в ЮКассе
         
@@ -38,16 +38,18 @@ class YooKassaClient:
             payment_type: Тип платежа (lite/premium/tokens/photo)
             
         Returns:
-            Словарь с данными платежа или None при ошибке
+            Кортеж (payment_data, error_type):
+            - payment_data: Словарь с данными платежа или None при ошибке
+            - error_type: 'network' для сетевых ошибок, 'config' для ошибок настроек, None если успех
         """
         try:
             # Проверяем наличие обязательных параметров перед запросом
             if not self.shop_id or self.shop_id == '000000' or self.shop_id == 'None':
                 logger.error("❌ Shop ID не настроен! Невозможно создать платеж.")
-                return None
+                return None, 'config'
             if not self.api_key or self.api_key == 'None':
                 logger.error("❌ API Key не настроен! Невозможно создать платеж.")
-                return None
+                return None, 'config'
             
             idempotence_key = str(uuid.uuid4())
             
@@ -104,7 +106,7 @@ class YooKassaClient:
             if response.status_code in [200, 201]:
                 payment_data = response.json()
                 logger.info(f"Создан платеж {payment_data['id']} для пользователя {user_id}")
-                return payment_data
+                return payment_data, None
             else:
                 error_text = response.text
                 logger.error(f"Ошибка создания платежа: {response.status_code}")
@@ -146,12 +148,16 @@ class YooKassaClient:
                     logger.error("3. Если используете live_ ключ, убедитесь, что магазин активирован для продакшена")
                     logger.error("4. Если используете test_ ключ, убедитесь, что Shop ID тоже от тестового аккаунта")
                     logger.error("=" * 60)
+                    return None, 'config'
                 
-                return None
+                return None, 'config'
                 
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+            logger.error(f"Сетевая ошибка при создании платежа: {e}")
+            return None, 'network'
         except Exception as e:
             logger.error(f"Исключение при создании платежа: {e}")
-            return None
+            return None, 'config'
     
     def check_payment_status(self, payment_id: str) -> Optional[Dict]:
         """
